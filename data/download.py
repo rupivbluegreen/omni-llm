@@ -2,121 +2,119 @@
 
 Downloads datasets from HuggingFace and prepares a weighted pretraining mix
 with a 60/25/15 split across code, code-adjacent NL, and general NL.
+
+Requires: pip install datasets huggingface_hub
+Login first: huggingface-cli login
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-PRETRAINING_DATASETS = {
-    # 60% code — The Stack v2 subsets weighted by language
-    "code": {
-        "source": "the_stack_v2",
-        "weight": 0.60,
-        "languages": {
-            "python": 0.30,
-            "javascript": 0.20,
-            "typescript": 0.15,
-            "java": 0.10,
-            "go": 0.08,
-            "rust": 0.07,
-            "c": 0.05,
-            "cpp": 0.05,
-        },
-    },
-    # 25% code-adjacent natural language
-    "code_adjacent_nl": {
-        "weight": 0.25,
-        "subsets": {
-            "stackoverflow": {"weight": 0.10, "source": "stackoverflow"},
-            "github_readmes": {"weight": 0.05, "source": "github_readmes"},
-            "documentation": {"weight": 0.05, "source": "documentation"},
-            "github_issues": {"weight": 0.05, "source": "github_issues"},
-        },
-    },
-    # 15% general natural language
-    "general_nl": {
-        "weight": 0.15,
-        "subsets": {
-            "fineweb_edu": {"weight": 0.10, "source": "fineweb_edu"},
-            "wikipedia_tech": {"weight": 0.05, "source": "wikipedia_tech"},
-        },
-    },
-}
+# Real HuggingFace dataset IDs and their configurations.
+# Each entry: (output_name, hf_dataset_id, hf_kwargs, text_field, weight)
+DATASET_REGISTRY: list[tuple[str, str, dict, str, float]] = [
+    # ── 60% Code (The Stack v2 dedup, by language) ──
+    ("code_python", "bigcode/the-stack-v2-dedup", {"data_dir": "data/python", "split": "train"}, "content", 0.18),
+    ("code_javascript", "bigcode/the-stack-v2-dedup", {"data_dir": "data/javascript", "split": "train"}, "content", 0.12),
+    ("code_typescript", "bigcode/the-stack-v2-dedup", {"data_dir": "data/typescript", "split": "train"}, "content", 0.09),
+    ("code_java", "bigcode/the-stack-v2-dedup", {"data_dir": "data/java", "split": "train"}, "content", 0.06),
+    ("code_go", "bigcode/the-stack-v2-dedup", {"data_dir": "data/go", "split": "train"}, "content", 0.048),
+    ("code_rust", "bigcode/the-stack-v2-dedup", {"data_dir": "data/rust", "split": "train"}, "content", 0.042),
+    ("code_c", "bigcode/the-stack-v2-dedup", {"data_dir": "data/c", "split": "train"}, "content", 0.03),
+    ("code_cpp", "bigcode/the-stack-v2-dedup", {"data_dir": "data/c++", "split": "train"}, "content", 0.03),
+    # ── 25% Code-adjacent NL ──
+    ("stackoverflow", "kto-learning/stackoverflow-paired-questions", {"split": "train"}, "body", 0.10),
+    ("github_readmes", "JetBrains/github-readmes", {"split": "train"}, "text", 0.05),
+    ("documentation", "CarperAI/pilev2-dev-docs", {"split": "train"}, "text", 0.05),
+    ("github_issues", "bigcode/the-stack-v2-dedup", {"data_dir": "data/markdown", "split": "train"}, "content", 0.05),
+    # ── 15% General NL ──
+    ("fineweb_edu", "HuggingFaceFW/fineweb-edu", {"name": "sample-10BT", "split": "train"}, "text", 0.10),
+    ("wikipedia", "wikimedia/wikipedia", {"name": "20231101.en", "split": "train"}, "text", 0.05),
+]
+
+# Fallback datasets if gated ones are inaccessible
+FALLBACK_CODE = [
+    ("code_python", "codeparrot/github-code", {"languages": ["Python"], "split": "train"}, "code", 0.18),
+    ("code_javascript", "codeparrot/github-code", {"languages": ["JavaScript"], "split": "train"}, "code", 0.12),
+]
 
 
-def download_dataset(name: str, config: dict, output_dir: Path) -> Path:
-    """Download a HuggingFace dataset with streaming and write to JSONL.
-
-    Args:
-        name: Dataset identifier (e.g. 'the_stack_v2', 'stackoverflow').
-        config: Configuration dict with at least a 'source' key and optional
-            'subset' or 'language' keys for filtering.
-        output_dir: Directory to write the downloaded JSONL file.
-
-    Returns:
-        Path to the written JSONL file.
-    """
-    try:
-        from datasets import load_dataset
-    except ImportError:
-        print(
-            "ERROR: The 'datasets' package is required. "
-            "Install it with: pip install datasets",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+def download_dataset(
+    name: str,
+    hf_id: str,
+    hf_kwargs: dict,
+    text_field: str,
+    output_dir: Path,
+    max_examples: int | None = None,
+) -> Path:
+    """Download a HuggingFace dataset with streaming and write to JSONL."""
+    from datasets import load_dataset
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{name}.jsonl"
 
-    source = config.get("source", name)
-    subset = config.get("subset")
-    language = config.get("language")
+    if output_path.exists():
+        # Count existing lines
+        with open(output_path) as f:
+            existing = sum(1 for _ in f)
+        if existing > 0:
+            print(f"  Skipping '{name}' — already has {existing:,} examples at {output_path}",
+                  file=sys.stderr)
+            return output_path
 
-    print(f"Downloading dataset '{source}'"
-          f"{f' (subset={subset})' if subset else ''}"
-          f"{f' (language={language})' if language else ''}...",
-          file=sys.stderr)
+    # Build load_dataset kwargs
+    kwargs = {"streaming": True}
+    split = hf_kwargs.pop("split", "train") if "split" in hf_kwargs else "train"
+
+    # Handle special kwargs
+    for key in ("name", "data_dir", "data_files", "languages"):
+        if key in hf_kwargs:
+            kwargs[key] = hf_kwargs[key]
+
+    hf_kwargs_display = {k: v for k, v in kwargs.items() if k != "streaming"}
+    print(f"  Downloading '{name}' from {hf_id} {hf_kwargs_display}...", file=sys.stderr)
 
     try:
-        kwargs = {"streaming": True}
-        if subset:
-            kwargs["name"] = subset
-        if language:
-            kwargs["data_dir"] = language
-
-        ds = load_dataset(source, split="train", **kwargs)
-
-        count = 0
-        with open(output_path, "w") as f:
-            for example in ds:
-                text = example.get("text") or example.get("content") or ""
-                if not text.strip():
-                    continue
-                record = {"text": text, "source": name}
-                if language:
-                    record["language"] = language
-                f.write(json.dumps(record) + "\n")
-                count += 1
-                if count % 10_000 == 0:
-                    print(f"  ... {count} examples written", file=sys.stderr)
-
-        print(f"Finished '{name}': {count} examples -> {output_path}",
-              file=sys.stderr)
-        return output_path
-
+        ds = load_dataset(hf_id, split=split, trust_remote_code=True, **kwargs)
     except Exception as e:
-        print(
-            f"ERROR downloading dataset '{name}': {e}\n"
-            f"Make sure you have access to the dataset and are logged in "
-            f"with `huggingface-cli login` if needed.",
-            file=sys.stderr,
-        )
+        print(f"  ERROR loading '{name}': {e}", file=sys.stderr)
         raise
+
+    count = 0
+    with open(output_path, "w") as f:
+        for example in ds:
+            # Try the specified text field, then common alternatives
+            text = None
+            for field in (text_field, "text", "content", "code", "body"):
+                if field in example and example[field]:
+                    text = example[field]
+                    break
+
+            if not text or not text.strip():
+                continue
+
+            # Skip very short texts
+            if len(text.strip()) < 50:
+                continue
+
+            record = {"text": text, "source": name}
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            count += 1
+
+            if count % 10_000 == 0:
+                print(f"    {count:,} examples...", file=sys.stderr, end="\r")
+
+            if max_examples and count >= max_examples:
+                print(f"    Reached max_examples={max_examples:,}", file=sys.stderr)
+                break
+
+    print(f"  Done '{name}': {count:,} examples -> {output_path}", file=sys.stderr)
+    return output_path
 
 
 def shard_jsonl(
@@ -124,16 +122,7 @@ def shard_jsonl(
     output_dir: Path,
     max_lines_per_shard: int = 100_000,
 ) -> list[Path]:
-    """Split a large JSONL file into smaller shards.
-
-    Args:
-        input_path: Path to the input JSONL file.
-        output_dir: Directory to write shard files.
-        max_lines_per_shard: Maximum number of lines per shard.
-
-    Returns:
-        List of paths to the created shard files.
-    """
+    """Split a large JSONL file into smaller shards."""
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = input_path.stem
 
@@ -159,7 +148,7 @@ def shard_jsonl(
         if current_file is not None:
             current_file.close()
 
-    print(f"Sharded {input_path.name}: {line_count} lines -> {shard_idx} shards",
+    print(f"  Sharded {input_path.name}: {line_count:,} lines -> {shard_idx} shards",
           file=sys.stderr)
     return shard_paths
 
@@ -169,69 +158,38 @@ def prepare_pretraining_mix(
     output_dir: Path,
     max_tokens: int = 20_000_000_000,
 ) -> None:
-    """Read downloaded datasets, sample according to weights, and write sharded output.
-
-    This interleaves data from different sources according to the weights
-    defined in PRETRAINING_DATASETS and writes sharded JSONL files.
-
-    Args:
-        data_dir: Directory containing downloaded JSONL files.
-        output_dir: Directory to write the interleaved, sharded output.
-        max_tokens: Approximate maximum number of tokens in the final mix.
-    """
+    """Read downloaded datasets, sample according to weights, and write sharded output."""
     import random
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Collect all source files and their weights
+    # Collect all downloaded source files and their weights
     sources: list[tuple[Path, float]] = []
-
-    # Code datasets (per-language)
-    code_cfg = PRETRAINING_DATASETS["code"]
-    for lang, lang_weight in code_cfg["languages"].items():
-        path = data_dir / f"the_stack_v2_{lang}.jsonl"
-        if path.exists():
-            sources.append((path, lang_weight))
+    for name, _, _, _, weight in DATASET_REGISTRY:
+        path = data_dir / f"{name}.jsonl"
+        if path.exists() and path.stat().st_size > 0:
+            sources.append((path, weight))
         else:
-            print(f"WARNING: Missing {path}, skipping", file=sys.stderr)
-
-    # Code-adjacent NL
-    for subset_name, subset_cfg in PRETRAINING_DATASETS["code_adjacent_nl"]["subsets"].items():
-        path = data_dir / f"{subset_name}.jsonl"
-        if path.exists():
-            sources.append((path, subset_cfg["weight"]))
-        else:
-            print(f"WARNING: Missing {path}, skipping", file=sys.stderr)
-
-    # General NL
-    for subset_name, subset_cfg in PRETRAINING_DATASETS["general_nl"]["subsets"].items():
-        path = data_dir / f"{subset_name}.jsonl"
-        if path.exists():
-            sources.append((path, subset_cfg["weight"]))
-        else:
-            print(f"WARNING: Missing {path}, skipping", file=sys.stderr)
+            print(f"  WARNING: Missing or empty {path}, skipping", file=sys.stderr)
 
     if not sources:
-        print("ERROR: No source datasets found in data_dir.", file=sys.stderr)
+        print("ERROR: No source datasets found. Run download first.", file=sys.stderr)
         sys.exit(1)
 
-    # Normalize weights
+    # Normalize weights to sum to 1
     total_weight = sum(w for _, w in sources)
     sources = [(p, w / total_weight) for p, w in sources]
 
-    # Estimate tokens per character (~0.25 tokens per char is a rough average)
+    print(f"  Found {len(sources)} datasets, preparing mix "
+          f"(target: ~{max_tokens:,} tokens)...", file=sys.stderr)
+
     tokens_per_char = 0.25
     max_chars = int(max_tokens / tokens_per_char)
-
-    # Read and sample from each source
-    print(f"Preparing pretraining mix (target: ~{max_tokens:,} tokens)...",
-          file=sys.stderr)
 
     mixed_output = output_dir / "pretrain_mix.jsonl"
     total_chars = 0
 
     with open(mixed_output, "w") as out_f:
-        # Round-robin through sources weighted by their ratios
         file_handles = {}
         try:
             for path, weight in sources:
@@ -243,7 +201,6 @@ def prepare_pretraining_mix(
                     if path in exhausted:
                         continue
 
-                    # Number of lines to read proportional to weight
                     lines_to_read = max(1, int(weight * 100))
                     for _ in range(lines_to_read):
                         line = file_handles[path].readline()
@@ -262,31 +219,24 @@ def prepare_pretraining_mix(
             for fh in file_handles.values():
                 fh.close()
 
-    print(f"Mixed output: ~{int(total_chars * tokens_per_char):,} tokens "
-          f"-> {mixed_output}", file=sys.stderr)
+    estimated_tokens = int(total_chars * tokens_per_char)
+    print(f"  Mixed output: ~{estimated_tokens:,} tokens -> {mixed_output}",
+          file=sys.stderr)
 
     # Shard the output
     shard_jsonl(mixed_output, output_dir / "shards")
 
-    # Shuffle shards
-    shard_dir = output_dir / "shards"
-    shards = sorted(shard_dir.glob("*.jsonl"))
-    random.shuffle(shards)
-
-    # Write a manifest
-    manifest_path = output_dir / "manifest.json"
+    # Write manifest
     manifest = {
         "total_chars": total_chars,
-        "estimated_tokens": int(total_chars * tokens_per_char),
+        "estimated_tokens": estimated_tokens,
         "max_tokens_target": max_tokens,
-        "num_shards": len(shards),
-        "shards": [str(s.name) for s in shards],
         "sources": {str(p.name): w for p, w in sources},
     }
+    manifest_path = output_dir / "manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
-
-    print(f"Manifest written to {manifest_path}", file=sys.stderr)
+    print(f"  Manifest: {manifest_path}", file=sys.stderr)
 
 
 def main():
@@ -294,74 +244,68 @@ def main():
         description="Download and prepare pretraining data for OmniscientLLM"
     )
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("data/raw"),
+        "--output-dir", type=Path, default=Path("data/raw"),
         help="Output directory for downloaded data (default: data/raw)",
     )
     parser.add_argument(
-        "--datasets",
-        type=str,
-        default="all",
-        help='Comma-separated list of dataset names to download, or "all" (default: all)',
+        "--datasets", type=str, default="all",
+        help=(
+            'Comma-separated dataset names, or "all", or a category: '
+            '"code", "code_nl", "general_nl" (default: all)'
+        ),
     )
     parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=20_000_000_000,
+        "--max-tokens", type=int, default=20_000_000_000,
         help="Approximate max tokens for the pretraining mix (default: 20B)",
+    )
+    parser.add_argument(
+        "--max-examples-per-dataset", type=int, default=None,
+        help="Cap examples per dataset (useful for testing the pipeline)",
+    )
+    parser.add_argument(
+        "--skip-mix", action="store_true",
+        help="Only download, don't prepare the pretraining mix",
     )
     args = parser.parse_args()
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine which datasets to download
-    all_datasets = {}
-
-    # Code datasets (one per language)
-    code_cfg = PRETRAINING_DATASETS["code"]
-    for lang, lang_weight in code_cfg["languages"].items():
-        ds_name = f"the_stack_v2_{lang}"
-        all_datasets[ds_name] = {
-            "source": code_cfg["source"],
-            "language": lang,
-            "weight": lang_weight,
-        }
-
-    # Code-adjacent NL datasets
-    for name, cfg in PRETRAINING_DATASETS["code_adjacent_nl"]["subsets"].items():
-        all_datasets[name] = {"source": cfg["source"], "weight": cfg["weight"]}
-
-    # General NL datasets
-    for name, cfg in PRETRAINING_DATASETS["general_nl"]["subsets"].items():
-        all_datasets[name] = {"source": cfg["source"], "weight": cfg["weight"]}
-
+    # Filter datasets
     if args.datasets == "all":
-        to_download = all_datasets
+        to_download = DATASET_REGISTRY
+    elif args.datasets == "code":
+        to_download = [d for d in DATASET_REGISTRY if d[0].startswith("code_")]
+    elif args.datasets == "code_nl":
+        to_download = [d for d in DATASET_REGISTRY if d[0] in
+                       ("stackoverflow", "github_readmes", "documentation", "github_issues")]
+    elif args.datasets == "general_nl":
+        to_download = [d for d in DATASET_REGISTRY if d[0] in ("fineweb_edu", "wikipedia")]
     else:
-        requested = [s.strip() for s in args.datasets.split(",")]
-        to_download = {}
-        for name in requested:
-            if name in all_datasets:
-                to_download[name] = all_datasets[name]
-            else:
-                print(f"WARNING: Unknown dataset '{name}', skipping. "
-                      f"Available: {', '.join(sorted(all_datasets.keys()))}",
-                      file=sys.stderr)
+        requested = {s.strip() for s in args.datasets.split(",")}
+        to_download = [d for d in DATASET_REGISTRY if d[0] in requested]
+        if not to_download:
+            available = [d[0] for d in DATASET_REGISTRY]
+            print(f"ERROR: No matching datasets. Available: {', '.join(available)}",
+                  file=sys.stderr)
+            sys.exit(1)
 
-    # Download each dataset
-    for name, config in to_download.items():
+    # Download
+    print(f"Downloading {len(to_download)} datasets to {output_dir}...", file=sys.stderr)
+    for name, hf_id, hf_kwargs, text_field, weight in to_download:
         try:
-            download_dataset(name, config, output_dir)
+            download_dataset(
+                name, hf_id, dict(hf_kwargs), text_field, output_dir,
+                max_examples=args.max_examples_per_dataset,
+            )
         except Exception as e:
-            print(f"Failed to download '{name}': {e}", file=sys.stderr)
+            print(f"  FAILED '{name}': {e}", file=sys.stderr)
             continue
 
-    # Prepare the pretraining mix
-    print("\nPreparing pretraining mix...", file=sys.stderr)
-    mix_dir = output_dir.parent / "processed"
-    prepare_pretraining_mix(output_dir, mix_dir, max_tokens=args.max_tokens)
+    if not args.skip_mix:
+        print("\nPreparing pretraining mix...", file=sys.stderr)
+        mix_dir = output_dir.parent / "processed"
+        prepare_pretraining_mix(output_dir, mix_dir, max_tokens=args.max_tokens)
 
     print("\nDone!", file=sys.stderr)
 
