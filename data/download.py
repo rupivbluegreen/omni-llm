@@ -17,30 +17,58 @@ from pathlib import Path
 
 # Real HuggingFace dataset IDs and their configurations.
 # Each entry: (output_name, hf_dataset_id, hf_kwargs, text_field, weight)
+#
+# All datasets below are native Parquet on HuggingFace — no trust_remote_code needed.
+# Verified working with datasets>=3.0 and streaming=True.
+#
+# Code datasets use bigcode/starcoderdata (gated, requires accepting ToS):
+#   - Parquet format, content field = "content", per-language via data_dir
+#   - Alternative: bigcode/the-stack-dedup (v1) also works with same field/dir scheme
+#   - NOTE: bigcode/the-stack-v2-dedup only contains SWHIDs, NOT actual code content
+#
 DATASET_REGISTRY: list[tuple[str, str, dict, str, float]] = [
-    # ── 60% Code (The Stack v2 dedup, by language) ──
-    ("code_python", "bigcode/the-stack-v2-dedup", {"data_dir": "data/python", "split": "train"}, "content", 0.18),
-    ("code_javascript", "bigcode/the-stack-v2-dedup", {"data_dir": "data/javascript", "split": "train"}, "content", 0.12),
-    ("code_typescript", "bigcode/the-stack-v2-dedup", {"data_dir": "data/typescript", "split": "train"}, "content", 0.09),
-    ("code_java", "bigcode/the-stack-v2-dedup", {"data_dir": "data/java", "split": "train"}, "content", 0.06),
-    ("code_go", "bigcode/the-stack-v2-dedup", {"data_dir": "data/go", "split": "train"}, "content", 0.048),
-    ("code_rust", "bigcode/the-stack-v2-dedup", {"data_dir": "data/rust", "split": "train"}, "content", 0.042),
-    ("code_c", "bigcode/the-stack-v2-dedup", {"data_dir": "data/c", "split": "train"}, "content", 0.03),
-    ("code_cpp", "bigcode/the-stack-v2-dedup", {"data_dir": "data/c++", "split": "train"}, "content", 0.03),
+    # ── 60% Code (StarCoderData, by language) ──
+    # Gated: requires `huggingface-cli login` and accepting ToS at
+    # https://huggingface.co/datasets/bigcode/starcoderdata
+    # Field: "content", data_dir: lowercase language name
+    ("code_python", "bigcode/starcoderdata", {"data_dir": "python", "split": "train"}, "content", 0.18),
+    ("code_javascript", "bigcode/starcoderdata", {"data_dir": "javascript", "split": "train"}, "content", 0.12),
+    ("code_typescript", "bigcode/starcoderdata", {"data_dir": "typescript", "split": "train"}, "content", 0.09),
+    ("code_java", "bigcode/starcoderdata", {"data_dir": "java", "split": "train"}, "content", 0.06),
+    ("code_go", "bigcode/starcoderdata", {"data_dir": "go", "split": "train"}, "content", 0.048),
+    ("code_rust", "bigcode/starcoderdata", {"data_dir": "rust", "split": "train"}, "content", 0.042),
+    ("code_c", "bigcode/starcoderdata", {"data_dir": "c", "split": "train"}, "content", 0.03),
+    ("code_cpp", "bigcode/starcoderdata", {"data_dir": "c++", "split": "train"}, "content", 0.03),
     # ── 25% Code-adjacent NL ──
-    ("stackoverflow", "kto-learning/stackoverflow-paired-questions", {"split": "train"}, "body", 0.10),
-    ("github_readmes", "JetBrains/github-readmes", {"split": "train"}, "text", 0.05),
-    ("documentation", "CarperAI/pilev2-dev-docs", {"split": "train"}, "text", 0.05),
-    ("github_issues", "bigcode/the-stack-v2-dedup", {"data_dir": "data/markdown", "split": "train"}, "content", 0.05),
+    # bigcode/stackoverflow-clean: 10.4M posts, Parquet, not gated, field = "content"
+    ("stackoverflow", "bigcode/stackoverflow-clean", {"split": "train"}, "content", 0.10),
+    # mikex86/stackoverflow-posts: 58.3M posts, Parquet, not gated, field = "Body"
+    # (alternative if more data needed)
+    # Markdown from starcoderdata as proxy for READMEs/docs (gated)
+    ("github_readmes", "bigcode/starcoderdata", {"data_dir": "markdown", "split": "train"}, "content", 0.05),
+    # Restructured-text docs from starcoderdata (gated)
+    ("documentation", "bigcode/starcoderdata", {"data_dir": "restructuredtext", "split": "train"}, "content", 0.05),
+    # GitHub issues subset of starcoderdata (gated, different columns — load separately)
+    ("github_issues", "bigcode/starcoderdata", {"data_dir": "github-issues-filtered-structured", "split": "train"}, "content", 0.05),
     # ── 15% General NL ──
+    # HuggingFaceFW/fineweb-edu: Parquet, not gated, field = "text"
+    # Valid configs: "sample-10BT", "sample-100BT", "sample-350BT", "default", or CC-MAIN-* dumps
     ("fineweb_edu", "HuggingFaceFW/fineweb-edu", {"name": "sample-10BT", "split": "train"}, "text", 0.10),
+    # wikimedia/wikipedia: Parquet, not gated, field = "text"
+    # Config = "YYYYMMDD.lang", e.g. "20231101.en"
     ("wikipedia", "wikimedia/wikipedia", {"name": "20231101.en", "split": "train"}, "text", 0.05),
 ]
 
-# Fallback datasets if gated ones are inaccessible
+# Fallback datasets if gated starcoderdata is inaccessible.
+# codeparrot/github-code-clean: Parquet, NOT gated, no trust_remote_code needed.
+# Field: "code", configs: "{Language}-all" (e.g. "Python-all", "JavaScript-all")
+# Limited languages: Python, JavaScript, Java, C, C++, C#, PHP, HTML (no TS/Go/Rust)
 FALLBACK_CODE = [
-    ("code_python", "codeparrot/github-code", {"languages": ["Python"], "split": "train"}, "code", 0.18),
-    ("code_javascript", "codeparrot/github-code", {"languages": ["JavaScript"], "split": "train"}, "code", 0.12),
+    ("code_python", "codeparrot/github-code-clean", {"name": "Python-all", "split": "train"}, "code", 0.18),
+    ("code_javascript", "codeparrot/github-code-clean", {"name": "JavaScript-all", "split": "train"}, "code", 0.12),
+    ("code_java", "codeparrot/github-code-clean", {"name": "Java-all", "split": "train"}, "code", 0.09),
+    ("code_c", "codeparrot/github-code-clean", {"name": "C-all", "split": "train"}, "code", 0.06),
+    ("code_cpp", "codeparrot/github-code-clean", {"name": "C++-all", "split": "train"}, "code", 0.06),
 ]
 
 
@@ -69,9 +97,9 @@ def download_dataset(
 
     # Build load_dataset kwargs
     kwargs = {"streaming": True}
-    split = hf_kwargs.pop("split", "train") if "split" in hf_kwargs else "train"
+    split = hf_kwargs.get("split", "train")
 
-    # Handle special kwargs
+    # Pass through HF-specific kwargs (but not 'split')
     for key in ("name", "data_dir", "data_files", "languages"):
         if key in hf_kwargs:
             kwargs[key] = hf_kwargs[key]
@@ -80,7 +108,7 @@ def download_dataset(
     print(f"  Downloading '{name}' from {hf_id} {hf_kwargs_display}...", file=sys.stderr)
 
     try:
-        ds = load_dataset(hf_id, split=split, trust_remote_code=True, **kwargs)
+        ds = load_dataset(hf_id, split=split, **kwargs)
     except Exception as e:
         print(f"  ERROR loading '{name}': {e}", file=sys.stderr)
         raise
