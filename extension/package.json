@@ -1,0 +1,62 @@
+{
+  "name": "omniscient-llm",
+  "displayName": "OmniscientLLM",
+  "description": "AI coding assistant powered by OmniscientLLM-200M",
+  "version": "0.1.0",
+  "publisher": "omniscient",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages", "Machine Learning"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "omniscient.openChat", "title": "OmniscientLLM: Open Chat" },
+      { "command": "omniscient.explain", "title": "OmniscientLLM: Explain Code" },
+      { "command": "omniscient.fix", "title": "OmniscientLLM: Fix Code" },
+      { "command": "omniscient.test", "title": "OmniscientLLM: Generate Tests" },
+      { "command": "omniscient.review", "title": "OmniscientLLM: Review Code" },
+      { "command": "omniscient.ask", "title": "OmniscientLLM: Ask Question" },
+      { "command": "omniscient.doc", "title": "OmniscientLLM: Generate Docs" },
+      { "command": "omniscient.commit", "title": "OmniscientLLM: Generate Commit Message" },
+      { "command": "omniscient.debug", "title": "OmniscientLLM: Debug Error" }
+    ],
+    "keybindings": [
+      {
+        "command": "omniscient.openChat",
+        "key": "ctrl+shift+o",
+        "mac": "cmd+shift+o"
+      }
+    ],
+    "configuration": {
+      "title": "OmniscientLLM",
+      "properties": {
+        "omniscient.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "URL of the OmniscientLLM server"
+        },
+        "omniscient.enableThinking": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show model's thinking/reasoning process"
+        },
+        "omniscient.maxTokens": {
+          "type": "number",
+          "default": 512,
+          "description": "Maximum tokens in response"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}

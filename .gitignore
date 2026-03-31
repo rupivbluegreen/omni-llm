@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+*.egg
+
+# ML artifacts
+checkpoints/
+*.gguf
+*.safetensors
+*.bin
+.chroma_db/
+data/raw/
+data/processed/
+wandb/
+
+# Tokenizer output (trained)
+tokenizer/omniscient-tokenizer.json
+
+# SQLite
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (extension)
+extension/node_modules/
+extension/out/
+extension/*.vsix
+
+# Env
+.env
+.env.local
+
+# Ruff
+.ruff_cache/
+
+# Pytest
+.pytest_cache/
