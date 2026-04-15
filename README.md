@@ -25,7 +25,7 @@ A 200M-parameter conversational coding chat agent. Trained with MLX on Apple Sil
 │  ├── 16 Transformer blocks, GQA (16 query / 4 KV)      │
 │  ├── SwiGLU FFN, RMSNorm, RoPE (theta=500K)            │
 │  ├── 4096 context, 32K vocab, weight-tied               │
-│  └── Trained: Pretrain → SFT → FIM → DPO               │
+│  └── Trained: Pretrain (+FIM inline) → SFT → DPO       │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -76,7 +76,10 @@ tests/          — pytest tests
 
 ## Training Pipeline
 
-1. **Pretrain** (100K steps) — 60% code + 25% code-adjacent NL + 15% general NL
-2. **SFT** (8K steps) — Multi-turn conversations with assistant-only loss masking
-3. **FIM** (10K steps) — Fill-in-the-middle for inline completions
-4. **DPO** (3K steps) — Preference alignment with frozen reference model
+1. **Pretrain** (100K steps) — 60% code + 25% code-adjacent NL + 15% general NL. FIM (PSM/SPM) is applied inline at `--fim-rate 0.5`, StarCoder-style, so the model learns left-to-right and fill-in-the-middle jointly.
+2. **Stage gate** — `python -m evals.gate` runs held-out PPL + HumanEval pass@1 + MT-Bench slice and must pass before the next stage.
+3. **SFT** (≤8K steps, capped by `--max-steps`) — Multi-turn conversations with assistant-only loss masking.
+4. **Stage gate** — same gate script; regression on any metric blocks promotion.
+5. **DPO** (3K steps) — Preference alignment with frozen reference model (β=0.1).
+
+All pretrain shards must be run through `python -m data.decontaminate` against HumanEval / MBPP / MT-Bench prompts before tokenization — eval numbers are meaningless otherwise.

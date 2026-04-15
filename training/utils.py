@@ -45,23 +45,58 @@ def save_checkpoint(
     loss: float,
     path: str | Path,
 ) -> None:
-    """Save model weights and training state."""
+    """Save model weights, optimizer state, and training state for true resume."""
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
-    # Save model weights
     mx.savez(str(path / "model.npz"), **dict(model.parameters()))
-    # Save training state
+    # Optimizer state must be persisted for resume — otherwise Adam moments reset
+    # and the LR schedule jumps discontinuously on restart.
+    try:
+        mx.savez(str(path / "optimizer.npz"), **dict(optimizer.state))
+    except Exception as e:
+        # Keep training fault-tolerant if optimizer serialization is unavailable,
+        # but surface it loudly so the operator knows resume won't be bitwise exact.
+        (path / "optimizer.MISSING").write_text(f"{type(e).__name__}: {e}\n")
     state = {"step": step, "loss": loss}
     (path / "state.json").write_text(json.dumps(state, indent=2))
 
 
-def load_checkpoint(model: nn.Module, path: str | Path) -> dict:
-    """Load model weights. Returns training state dict."""
+def load_checkpoint(model: nn.Module, path: str | Path, optimizer=None) -> dict:
+    """Load model weights (and optimizer state, if provided). Returns training state dict."""
     path = Path(path)
     weights = mx.load(str(path / "model.npz"))
     model.load_weights(list(weights.items()))
+    if optimizer is not None and (path / "optimizer.npz").exists():
+        opt_state = mx.load(str(path / "optimizer.npz"))
+        try:
+            optimizer.state.update(dict(opt_state))
+        except Exception:
+            pass
     state = json.loads((path / "state.json").read_text())
     return state
+
+
+def prune_old_checkpoints(output_dir: Path, keep_last_n: int) -> None:
+    """Keep only the N most-recent step-* checkpoint directories in output_dir.
+
+    Preserves any directory whose name ends in '-final' or is named 'best'.
+    """
+    if keep_last_n <= 0:
+        return
+    output_dir = Path(output_dir)
+    if not output_dir.exists():
+        return
+    candidates = [
+        p for p in output_dir.iterdir()
+        if p.is_dir()
+        and p.name.startswith("step-")
+        and not p.name.endswith("-final")
+        and p.name != "best"
+    ]
+    candidates.sort(key=lambda p: p.stat().st_mtime)
+    for old in candidates[:-keep_last_n]:
+        import shutil
+        shutil.rmtree(old, ignore_errors=True)
 
 
 def count_parameters(model: nn.Module) -> int:

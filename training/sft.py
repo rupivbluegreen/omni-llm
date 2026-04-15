@@ -36,11 +36,14 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to pretrained checkpoint")
     parser.add_argument("--data", type=str, required=True, help="SFT JSONL dataset path")
     parser.add_argument("--output-dir", type=str, default="checkpoints/sft", help="Output directory")
-    parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=3, help="Maximum epochs (upper bound; --max-steps may stop earlier)")
+    parser.add_argument("--max-steps", type=int, default=8000, help="Hard cap on optimizer steps")
     parser.add_argument("--batch-size", type=int, default=2, help="Micro-batch size")
     parser.add_argument("--grad-accum", type=int, default=16, help="Gradient accumulation steps")
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
     parser.add_argument("--warmup-steps", type=int, default=100, help="Warmup steps")
+    parser.add_argument("--scheduler", type=str, default="linear-warmup-constant", choices=["linear-warmup-constant", "cosine"], help="LR schedule")
+    parser.add_argument("--early-stop-patience", type=int, default=2, help="Stop if epoch loss fails to improve for N epochs (0 disables)")
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     parser.add_argument("--tokenizer", type=str, default="tokenizer.json", help="Path to tokenizer.json")
     args = parser.parse_args()
@@ -77,10 +80,11 @@ def main():
     conversations = load_sft_dataset(args.data)
     logger.log(0, {"msg": f"Loaded {len(conversations)} conversations from {args.data}"})
 
-    # Estimate total steps for LR schedule
-    # Rough estimate: num_conversations / batch_size / grad_accum * epochs
+    # Total optimizer steps is min(epoch-derived, --max-steps). The LR schedule
+    # uses this effective horizon so warmup + decay land at the real end of training.
     steps_per_epoch = max(1, len(conversations) // (args.batch_size * args.grad_accum))
-    total_steps = steps_per_epoch * args.epochs
+    epoch_derived_steps = steps_per_epoch * args.epochs
+    total_steps = min(epoch_derived_steps, args.max_steps)
 
     # Build loss_and_grad function
     loss_and_grad_fn = nn.value_and_grad(model, lambda m, batch: train_step(m, batch))
@@ -88,11 +92,15 @@ def main():
     # Training loop
     global_step = 0
     best_loss = float("inf")
+    epochs_since_improve = 0
     accumulated_grads = None
     accum_count = 0
     accum_loss = 0.0
+    stop_training = False
 
     for epoch in range(args.epochs):
+        if stop_training:
+            break
         epoch_loss = 0.0
         epoch_batches = 0
 
@@ -105,6 +113,10 @@ def main():
         )
 
         for batch in dataloader:
+            if global_step >= args.max_steps:
+                stop_training = True
+                break
+
             # Convert to mx arrays
             batch = {
                 "input_ids": mx.array(batch["input_ids"]),
@@ -112,7 +124,10 @@ def main():
             }
 
             # Update LR
-            lr = cosine_lr_schedule(global_step, args.lr, args.lr * 0.1, args.warmup_steps, total_steps)
+            if args.scheduler == "cosine":
+                lr = cosine_lr_schedule(global_step, args.lr, args.lr * 0.1, args.warmup_steps, total_steps)
+            else:  # linear-warmup-constant
+                lr = args.lr * min(1.0, (global_step + 1) / max(1, args.warmup_steps))
             optimizer.learning_rate = lr
 
             # Forward + backward
@@ -166,12 +181,18 @@ def main():
             "msg": f"Epoch {epoch + 1}/{args.epochs} complete",
         })
 
-        # Save best model
+        # Save best model + early-stop bookkeeping
         if epoch_avg_loss < best_loss:
             best_loss = epoch_avg_loss
+            epochs_since_improve = 0
             ckpt_path = Path(args.output_dir) / "best"
             save_checkpoint(model, optimizer, global_step, best_loss, ckpt_path)
             logger.log(global_step, {"msg": f"Best model saved to {ckpt_path} (loss={best_loss:.4f})"})
+        else:
+            epochs_since_improve += 1
+            if args.early_stop_patience > 0 and epochs_since_improve >= args.early_stop_patience:
+                logger.log(global_step, {"msg": f"Early stop: no improvement for {epochs_since_improve} epochs"})
+                stop_training = True
 
         # Save epoch checkpoint
         ckpt_path = Path(args.output_dir) / f"epoch-{epoch + 1}"

@@ -1,4 +1,4 @@
-.PHONY: serve train-tokenizer pretrain sft fim dpo test lint format eval clean
+.PHONY: serve train-tokenizer pretrain sft dpo gate decontaminate test lint format eval clean
 
 serve:
 	uvicorn server.api.main:app --host 0.0.0.0 --port 8000 --reload
@@ -12,11 +12,14 @@ pretrain:
 sft:
 	python -m training.sft
 
-fim:
-	python -m training.fim
-
 dpo:
 	python -m training.dpo
+
+gate:
+	python -m evals.gate
+
+decontaminate:
+	python -m data.decontaminate
 
 test:
 	python -m pytest tests/ -v

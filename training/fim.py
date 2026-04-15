@@ -1,4 +1,11 @@
-"""Fill-in-the-Middle (FIM) training transforms."""
+"""Fill-in-the-Middle (FIM) transforms.
+
+This module provides PSM/SPM augmentation used *inside* the pretraining loop
+(`training/pretrain.py` with `--fim-rate 0.5`). It is intentionally not a
+training entrypoint: folding FIM into pretrain (StarCoder / DeepSeek-Coder
+style) avoids the forgetting and under-training that comes from running FIM
+as a short post-pretrain stage.
+"""
 
 import random
 

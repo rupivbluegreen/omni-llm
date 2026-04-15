@@ -189,9 +189,20 @@ def main():
     parser.add_argument("--batch-size", type=int, default=2, help="Micro-batch size")
     parser.add_argument("--grad-accum", type=int, default=16, help="Gradient accumulation steps")
     parser.add_argument("--max-steps", type=int, default=3000, help="Maximum training steps")
+    parser.add_argument("--warmup-steps", type=int, default=150, help="Linear warmup steps")
+    parser.add_argument("--scheduler", type=str, default="constant", choices=["constant", "cosine"], help="LR schedule")
+    parser.add_argument("--min-effective-pairs", type=int, default=32, help="Fail-fast floor on batch_size * grad_accum")
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     parser.add_argument("--tokenizer", type=str, default="tokenizer.json", help="Path to tokenizer.json")
     args = parser.parse_args()
+
+    effective_pairs = args.batch_size * args.grad_accum
+    if effective_pairs < args.min_effective_pairs:
+        raise SystemExit(
+            f"DPO effective batch = {effective_pairs} preference pairs "
+            f"(batch_size={args.batch_size} * grad_accum={args.grad_accum}); "
+            f"must be >= {args.min_effective_pairs}. Increase --grad-accum."
+        )
 
     # Load tokenizer
     from tokenizers import Tokenizer
@@ -283,6 +294,13 @@ def main():
                 continue
 
             batch = pad_and_batch(batch_examples, pad_id)
+
+            # Update LR
+            if args.scheduler == "cosine":
+                lr = cosine_lr_schedule(step, args.lr, args.lr * 0.1, args.warmup_steps, args.max_steps)
+            else:  # constant w/ linear warmup
+                lr = args.lr * min(1.0, (step + 1) / max(1, args.warmup_steps))
+            optimizer.learning_rate = lr
 
             # Forward + backward
             loss, grads = loss_and_grad_fn(policy_model, batch)

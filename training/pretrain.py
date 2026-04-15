@@ -19,6 +19,7 @@ from training.utils import (
     save_checkpoint,
     load_checkpoint,
     count_parameters,
+    prune_old_checkpoints,
     TrainingLogger,
 )
 from training.fim import apply_fim_augmentation
@@ -117,7 +118,8 @@ def main():
     parser.add_argument("--checkpoint-every", type=int, default=5000, help="Checkpoint interval (steps)")
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
-    parser.add_argument("--fim-rate", type=float, default=0.0, help="FIM augmentation rate")
+    parser.add_argument("--fim-rate", type=float, default=0.5, help="FIM augmentation rate (applied in-pretrain, StarCoder-style)")
+    parser.add_argument("--keep-last-n", type=int, default=5, help="Rolling checkpoint window; older checkpoints are pruned")
     parser.add_argument("--tokenizer", type=str, default="tokenizer.json", help="Path to tokenizer.json")
     args = parser.parse_args()
 
@@ -233,6 +235,7 @@ def main():
                 if step % args.checkpoint_every == 0:
                     ckpt_path = Path(args.output_dir) / f"step-{step}"
                     save_checkpoint(model, optimizer, step, avg_loss if step % 10 == 0 else 0.0, ckpt_path)
+                    prune_old_checkpoints(Path(args.output_dir), args.keep_last_n)
                     logger.log(step, {"msg": f"Checkpoint saved to {ckpt_path}"})
 
                 if step >= args.max_steps:
