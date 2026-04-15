@@ -318,13 +318,34 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
 
+    # Derive a per-dataset example cap from --max-tokens if the caller didn't
+    # set one explicitly. Without this safety net, streaming datasets like
+    # starcoderdata can dump hundreds of GB even for a "small" --max-tokens.
+    # Rough assumption: ~500 tokens per code example; we want each dataset's
+    # raw download to be ~1.5x its final share of the mix to give the mix
+    # step room to maneuver.
+    per_dataset_cap = args.max_examples_per_dataset
+    if per_dataset_cap is None:
+        tokens_per_example = 500
+        n_sources = max(1, len(to_download))
+        per_dataset_cap = max(
+            1000,
+            int(1.5 * args.max_tokens / (n_sources * tokens_per_example)),
+        )
+        print(
+            f"  Auto-cap: --max-examples-per-dataset={per_dataset_cap:,} "
+            f"(derived from --max-tokens={args.max_tokens:,} across "
+            f"{n_sources} datasets). Override with --max-examples-per-dataset.",
+            file=sys.stderr,
+        )
+
     # Download
     print(f"Downloading {len(to_download)} datasets to {output_dir}...", file=sys.stderr)
     for name, hf_id, hf_kwargs, text_field, weight in to_download:
         try:
             download_dataset(
                 name, hf_id, dict(hf_kwargs), text_field, output_dir,
-                max_examples=args.max_examples_per_dataset,
+                max_examples=per_dataset_cap,
             )
         except Exception as e:
             print(f"  FAILED '{name}': {e}", file=sys.stderr)

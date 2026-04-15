@@ -104,7 +104,10 @@ def run_gate(
     metrics["ppl"] = compute_heldout_ppl(model, tokenizer, eval_data, config.max_seq_len)
     he = run_humaneval(model, tokenizer, n_samples=humaneval_samples)
     metrics["humaneval_pass_at_1"] = float(getattr(he, "pass_at_1", getattr(he, "score", 0.0)))
-    mt = run_mt_bench(model, tokenizer, n_questions=mt_bench_slice)
+    # run_mt_bench in evals/run_eval.py is currently a stub that returns 0.0
+    # without a judge_endpoint. We keep it in the gate so the wiring is proven
+    # end-to-end; once a real judge is available, thread it through here.
+    mt = run_mt_bench(model, tokenizer)
     metrics["mt_bench_score"] = float(getattr(mt, "score", 0.0))
 
     print(f"[gate:{stage}] metrics = {json.dumps(metrics, indent=2)}")

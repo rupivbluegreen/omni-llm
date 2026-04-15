@@ -45,17 +45,22 @@ def save_checkpoint(
     loss: float,
     path: str | Path,
 ) -> None:
-    """Save model weights, optimizer state, and training state for true resume."""
+    """Save model weights, optimizer state, and training state for true resume.
+
+    `model.parameters()` returns a nested dict tree; `mx.savez` only accepts
+    flat array kwargs, so we flatten with `tree_flatten` before unpacking.
+    """
+    from mlx.utils import tree_flatten
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
-    mx.savez(str(path / "model.npz"), **dict(model.parameters()))
+    flat_weights = dict(tree_flatten(model.parameters()))
+    mx.savez(str(path / "model.npz"), **flat_weights)
     # Optimizer state must be persisted for resume — otherwise Adam moments reset
     # and the LR schedule jumps discontinuously on restart.
     try:
-        mx.savez(str(path / "optimizer.npz"), **dict(optimizer.state))
+        flat_opt = dict(tree_flatten(optimizer.state))
+        mx.savez(str(path / "optimizer.npz"), **flat_opt)
     except Exception as e:
-        # Keep training fault-tolerant if optimizer serialization is unavailable,
-        # but surface it loudly so the operator knows resume won't be bitwise exact.
         (path / "optimizer.MISSING").write_text(f"{type(e).__name__}: {e}\n")
     state = {"step": step, "loss": loss}
     (path / "state.json").write_text(json.dumps(state, indent=2))
@@ -63,13 +68,15 @@ def save_checkpoint(
 
 def load_checkpoint(model: nn.Module, path: str | Path, optimizer=None) -> dict:
     """Load model weights (and optimizer state, if provided). Returns training state dict."""
+    from mlx.utils import tree_unflatten
     path = Path(path)
     weights = mx.load(str(path / "model.npz"))
-    model.load_weights(list(weights.items()))
+    # tree_unflatten reconstructs the nested dict expected by load_weights / update.
+    model.update(tree_unflatten(list(weights.items())))
     if optimizer is not None and (path / "optimizer.npz").exists():
-        opt_state = mx.load(str(path / "optimizer.npz"))
         try:
-            optimizer.state.update(dict(opt_state))
+            opt_state = mx.load(str(path / "optimizer.npz"))
+            optimizer.state.update(tree_unflatten(list(opt_state.items())))
         except Exception:
             pass
     state = json.loads((path / "state.json").read_text())
@@ -101,7 +108,8 @@ def prune_old_checkpoints(output_dir: Path, keep_last_n: int) -> None:
 
 def count_parameters(model: nn.Module) -> int:
     """Count total trainable parameters."""
-    return sum(p.size for _, p in model.parameters())
+    from mlx.utils import tree_flatten
+    return sum(p.size for _, p in tree_flatten(model.parameters()))
 
 
 class TrainingLogger:

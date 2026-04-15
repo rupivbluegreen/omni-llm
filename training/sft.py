@@ -7,6 +7,7 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+from mlx.utils import tree_map
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -138,7 +139,7 @@ def main():
             if accumulated_grads is None:
                 accumulated_grads = grads
             else:
-                accumulated_grads = mx.tree_map(lambda a, b: a + b, accumulated_grads, grads)
+                accumulated_grads = tree_map(lambda a, b: a + b, accumulated_grads, grads)
 
             accum_loss += loss.item()
             accum_count += 1
@@ -149,7 +150,7 @@ def main():
             if accum_count % args.grad_accum == 0:
                 # Average gradients
                 scale = 1.0 / args.grad_accum
-                averaged_grads = mx.tree_map(lambda g: g * scale, accumulated_grads)
+                averaged_grads = tree_map(lambda g: g * scale, accumulated_grads)
 
                 # Apply optimizer step
                 optimizer.update(model, averaged_grads)

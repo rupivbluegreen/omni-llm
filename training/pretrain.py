@@ -8,6 +8,7 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+from mlx.utils import tree_map
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -125,6 +126,12 @@ def main():
 
     # Load config and build model
     config = OmniscientConfig.load(args.config)
+    # Persist the *actual* config alongside checkpoints so downstream stages
+    # (SFT, DPO, gate) can rebuild the model with matching architecture. Without
+    # this, loaders fall back to OmniscientConfig defaults and silently mismatch.
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config.save(output_dir / "config.json")
     model = OmniscientModel(config)
 
     logger = TrainingLogger("pretrain", use_wandb=args.wandb)
@@ -195,7 +202,7 @@ def main():
             if accumulated_grads is None:
                 accumulated_grads = grads
             else:
-                accumulated_grads = mx.tree_map(lambda a, b: a + b, accumulated_grads, grads)
+                accumulated_grads = tree_map(lambda a, b: a + b, accumulated_grads, grads)
 
             accum_loss += loss.item()
             accum_count += 1
@@ -205,7 +212,7 @@ def main():
             if accum_count % args.grad_accum == 0:
                 # Average gradients
                 scale = 1.0 / args.grad_accum
-                averaged_grads = mx.tree_map(lambda g: g * scale, accumulated_grads)
+                averaged_grads = tree_map(lambda g: g * scale, accumulated_grads)
 
                 # Apply optimizer step
                 optimizer.update(model, averaged_grads)
